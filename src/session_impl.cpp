@@ -622,6 +622,23 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
 #endif
 		ec.clear();
 #endif // __APPLE__
+		// Respect SSL_CERT_FILE explicitly. asio's set_default_verify_paths()
+		// above is expected to honor it, but some OpenSSL build/platform
+		// combinations (e.g. static OpenSSL on Android, where the compiled-in
+		// OPENSSLDIR does not exist) end up with an empty store. Loading the
+		// file directly makes the behavior deterministic and gives a log line
+		// when it fails. On platforms without a usable default CA directory
+		// (Android), this is the only way to provide a trust store.
+		if (char const* cert_file = ::getenv("SSL_CERT_FILE"))
+		{
+			m_ssl_ctx.load_verify_file(cert_file, ec);
+#ifndef TORRENT_DISABLE_LOGGING
+			if (ec) session_log("SSL load_verify_file(SSL_CERT_FILE=%s) failed: %s"
+				, cert_file, ec.message().c_str());
+			else session_log("SSL loaded verify file from SSL_CERT_FILE=%s", cert_file);
+#endif
+			ec.clear();
+		}
 #ifdef __linux__
 		// Debian, Ubuntu, Alpine, openSUSE
 		m_ssl_ctx.load_verify_file("/etc/ssl/certs/ca-certificates.crt", ec);
