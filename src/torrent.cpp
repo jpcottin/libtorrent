@@ -377,7 +377,10 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 				tier = *tier_iter++;
 
 			e.fail_limit = 0;
-			e.source = lt::announce_entry::source_magnet_link;
+			if (p.ti)
+				e.source = lt::announce_entry::source_torrent;
+			else
+				e.source = lt::announce_entry::source_magnet_link;
 			e.tier = std::uint8_t(tier);
 
 			if (!m_trackers.add_tracker(e))
@@ -1211,6 +1214,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 		// if this is a hybrid torrent, we may have marked some more pieces
 		// as "have" but not yet validated them against the v2 hashes. At
 		// this point, just assume we have no pieces
+		++m_picker_generation;
 		m_picker.reset();
 		m_hash_picker.reset();
 		m_file_progress.clear();
@@ -1481,6 +1485,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 		p.start = 0;
 		piece_refcount refcount{picker(), piece};
 		auto self = shared_from_this();
+		std::uint8_t const gen = m_picker_generation;
 		for (int i = 0; i < blocks_in_piece; ++i, p.start += block_size())
 		{
 			piece_block const block(piece, i);
@@ -1515,9 +1520,14 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 			debug_log("*** add_piece [ piece: %d | block: %d ]"
 				, static_cast<int>(piece), i);
 #endif
-			m_ses.disk_thread().async_write(m_storage, p, data + p.start, nullptr
-				, [self, p](storage_error const& error) { self->on_disk_write_complete(error, p); }
-				, dflags);
+			m_ses.disk_thread().async_write(
+				m_storage,
+				p,
+				data + p.start,
+				nullptr,
+				[self, p, gen](
+					storage_error const& error) { self->on_disk_write_complete(error, p, gen); },
+				dflags);
 
 			bool const was_finished = picker().is_piece_finished(p.piece);
 			bool const multi = picker().num_peers(block) > 1;
@@ -1542,8 +1552,9 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 			refcount.disarm();
 	}
 
-	void torrent::on_disk_write_complete(storage_error const& error
-		, peer_request const& p) try
+	void torrent::on_disk_write_complete(
+		storage_error const& error, peer_request const& p, std::uint8_t const picker_gen)
+	try
 	{
 		TORRENT_ASSERT(is_single_thread());
 
@@ -1555,6 +1566,13 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 		INVARIANT_CHECK;
 		if (m_abort) return;
 		piece_block const block_finished(p.piece, p.start / block_size());
+
+		// a force_recheck() may have reset the picker after this write was
+		// issued by add_piece(); ignore the completion (success or failure)
+		// rather than touching downloading-piece state the recheck already
+		// discarded.
+		if (picker_gen != m_picker_generation)
+			return;
 
 		if (error)
 		{
@@ -2472,6 +2490,11 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 		// forget that we have any pieces
 		set_have_all(false);
 
+		// any disk job dispatched before this point is now stale; its
+		// completion handler must not touch the picker state we're about
+		// to discard.
+		++m_picker_generation;
+
 		// removing the piece picker will clear the user priorities
 		// instead, just clear which pieces we have
 		if (m_picker)
@@ -2586,6 +2609,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 			return;
 		}
 
+		std::uint8_t const gen = m_picker_generation;
+
 		for (int i = 0; i < num_outstanding; ++i)
 		{
 			if (has_picker())
@@ -2608,12 +2633,21 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 			if (torrent_file().info_hashes().has_v2())
 				hashes.resize(torrent_file().layout().blocks_in_piece2(m_checking_piece));
 
-			span<sha256_hash> v2_span(hashes);
-			m_ses.disk_thread().async_hash(m_storage, m_checking_piece, v2_span, flags
-				, [self = shared_from_this(), hashes1 = std::move(hashes)]
-				(piece_index_t p, sha1_hash const& h, storage_error const& error) mutable
-				{ self->on_piece_hashed(std::move(hashes1), p, h, error); });
+			// capture and advance before dispatching: with 0 disk threads
+			// (aio_threads=0, e.g. simulations), async_hash() may invoke its
+			// completion handler inline, before this call even returns.
+			piece_index_t const piece = m_checking_piece;
 			++m_checking_piece;
+
+			span<sha256_hash> v2_span(hashes);
+			m_ses.disk_thread().async_hash(m_storage,
+				piece,
+				v2_span,
+				flags,
+				[self = shared_from_this(), hashes1 = std::move(hashes), gen](
+					piece_index_t p, sha1_hash const& h, storage_error const& error) mutable {
+					self->on_piece_hashed(std::move(hashes1), p, h, error, gen);
+				});
 			if (m_checking_piece >= m_torrent_file->end_piece()) break;
 		}
 		m_ses.deferred_submit_jobs();
@@ -2626,15 +2660,24 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 
 	// This is only used for checking of torrents. i.e. force-recheck or initial checking
 	// of existing files
-	void torrent::on_piece_hashed(aux::vector<sha256_hash> block_hashes
-		, piece_index_t const piece, sha1_hash const& piece_hash
-		, storage_error const& error) try
+	void torrent::on_piece_hashed(aux::vector<sha256_hash> block_hashes,
+		piece_index_t const piece,
+		sha1_hash const& piece_hash,
+		storage_error const& error,
+		std::uint8_t const picker_gen)
+	try
 	{
 		TORRENT_ASSERT(is_single_thread());
 		INVARIANT_CHECK;
 
 		if (m_abort) return;
 		if (m_deleted) return;
+
+		// a force_recheck() started a new checking pass after this job was
+		// dispatched; m_checking_piece / m_num_checked_pieces now belong to
+		// that new pass and must not be advanced by this stale completion.
+		if (picker_gen != m_picker_generation)
+			return;
 
 		state_updated();
 
@@ -2795,12 +2838,21 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 			if (torrent_file().info_hashes().has_v2())
 				block_hashes.resize(torrent_file().layout().blocks_in_piece2(m_checking_piece));
 
-			span<sha256_hash> v2_span(block_hashes);
-			m_ses.disk_thread().async_hash(m_storage, m_checking_piece, v2_span, flags
-				, [self = shared_from_this(), hashes = std::move(block_hashes)]
-				(piece_index_t p, sha1_hash const& h, storage_error const& e)
-				{ self->on_piece_hashed(std::move(hashes), p, h, e); });
+			// capture and advance before dispatching: with 0 disk threads
+			// (aio_threads=0, e.g. simulations), async_hash() may invoke its
+			// completion handler inline, before this call even returns.
+			piece_index_t const next_piece = m_checking_piece;
 			++m_checking_piece;
+
+			span<sha256_hash> v2_span(block_hashes);
+			m_ses.disk_thread().async_hash(m_storage,
+				next_piece,
+				v2_span,
+				flags,
+				[self = shared_from_this(), hashes = std::move(block_hashes), picker_gen](
+					piece_index_t p, sha1_hash const& h, storage_error const& e) {
+					self->on_piece_hashed(std::move(hashes), p, h, e, picker_gen);
+				});
 			m_ses.deferred_submit_jobs();
 #ifndef TORRENT_DISABLE_LOGGING
 			debug_log("on_piece_hashed, m_checking_piece: %d"
@@ -3874,9 +3926,24 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 			else
 #endif
 			{
-				ADD_OUTSTANDING_ASYNC("torrent::on_peer_name_lookup");
-				m_ses.get_resolver().async_resolve(i.hostname, aux::resolver_interface::abort_on_shutdown
-					, std::bind(&torrent::on_peer_name_lookup, shared_from_this(), _1, _2, i.port, v));
+				// there's no mechanism to connect to a peer by hostname through
+				// a proxy, so with proxy_hostnames set, drop hostnamed peers
+				// instead of leaking them to the regular resolver. a literal IP
+				// address in i.hostname isn't a leak, since no real resolution
+				// happens. this only matters when peer connections are actually
+				// proxied, so with no proxy configured (or one that doesn't
+				// proxy peer connections) resolve normally
+				aux::proxy_settings const& ps = m_ses.proxy();
+				if (!settings().get_bool(settings_pack::proxy_hostnames)
+					|| aux::is_ip_address(i.hostname) || ps.type == settings_pack::none
+					|| !ps.proxy_peer_connections)
+				{
+					ADD_OUTSTANDING_ASYNC("torrent::on_peer_name_lookup");
+					m_ses.get_resolver().async_resolve(i.hostname,
+						aux::resolver_interface::abort_on_shutdown,
+						std::bind(
+							&torrent::on_peer_name_lookup, shared_from_this(), _1, _2, i.port, v));
+				}
 			}
 		}
 
@@ -4405,9 +4472,12 @@ namespace {
 		TORRENT_ASSERT(st.total_done >= st.total_wanted_done);
 	}
 
-	void torrent::on_piece_verified(aux::vector<sha256_hash> block_hashes
-		, piece_index_t const piece
-		, sha1_hash const& piece_hash, storage_error const& error) try
+	void torrent::on_piece_verified(aux::vector<sha256_hash> block_hashes,
+		piece_index_t const piece,
+		sha1_hash const& piece_hash,
+		storage_error const& error,
+		std::uint8_t const picker_gen)
+	try
 	{
 		TORRENT_ASSERT(is_single_thread());
 
@@ -4415,6 +4485,12 @@ namespace {
 		if (m_deleted) return;
 
 		if (!m_picker) return;
+
+		// a force_recheck() or handle_inconsistent_hashes() reset the
+		// picker after this job was dispatched; the piece it refers to may
+		// no longer correspond to any job the picker knows about.
+		if (picker_gen != m_picker_generation)
+			return;
 
 		m_picker->completed_hash_job(piece);
 
@@ -5965,12 +6041,14 @@ namespace {
 
 			set_error(err.ec, err.file());
 			pause();
-			return;
+		}
+		else if (alerts().should_post<file_prio_alert>())
+		{
+			alerts().emplace_alert<file_prio_alert>(get_handle());
 		}
 
-		if (alerts().should_post<file_prio_alert>())
-			alerts().emplace_alert<file_prio_alert>(get_handle());
-
+		// apply queued priorities even on failure; m_file_priority reflects
+		// the storage's actual state, and m_storage stays valid after pause()
 		if (!m_deferred_file_priorities.empty() && !m_abort)
 		{
 			auto new_priority = m_file_priority;
@@ -5988,7 +6066,6 @@ namespace {
 				download_priority_t const prio = p.second;
 				new_priority[index] = prio;
 			}
-			m_deferred_file_priorities.clear();
 			prioritize_files(std::move(new_priority));
 		}
 	}
@@ -6001,6 +6078,21 @@ namespace {
 			, valid_metadata() ? &m_torrent_file->layout() : nullptr);
 
 		m_deferred_file_priorities.clear();
+
+		// defer if a file priority update is already outstanding, like
+		// set_file_priority() does; concurrent async_set_file_priority() jobs
+		// can complete out of order and silently clobber this update.
+		// on_file_priority() applies the deferred priorities once the
+		// outstanding job completes.
+		if (m_outstanding_file_priority)
+		{
+			// m_deferred_file_priorities is empty here, and file_index_t
+			// increases monotonically, so end() is always the correct hint
+			for (file_index_t const i : new_priority.range())
+				m_deferred_file_priorities.emplace_hint(
+					m_deferred_file_priorities.end(), i, new_priority[i]);
+			return;
+		}
 
 		// storage may be NULL during shutdown
 		if (m_storage)
@@ -6654,6 +6746,18 @@ namespace {
 		update_want_tick();
 	}
 
+	namespace {
+	// true when a web seed's hostname should be forwarded to the proxy
+	// (via CONNECT for HTTP-type proxies, or SOCKS5's native domain-name
+	// addressing) rather than resolved locally
+	bool web_seed_hostname_via_proxy(aux::proxy_settings const& ps, std::string const& hostname)
+	{
+		return ps.proxy_hostnames && !aux::is_ip_address(hostname) && ps.proxy_peer_connections
+			&& (ps.type == settings_pack::http || ps.type == settings_pack::http_pw
+				|| ps.type == settings_pack::socks5 || ps.type == settings_pack::socks5_pw);
+	}
+	}
+
 	void torrent::connect_to_url_seed(std::list<web_seed_t>::iterator web)
 	{
 		TORRENT_ASSERT(is_single_thread());
@@ -6801,11 +6905,10 @@ namespace {
 				, [self = shared_from_this(), web, proxy_port](error_code const& e, std::vector<address> const& addrs)
 				{ self->wrap(&torrent::on_proxy_name_lookup, e, addrs, web, proxy_port); });
 		}
-		else if (ps.proxy_hostnames
-			&& (ps.type == settings_pack::socks5
-				|| ps.type == settings_pack::socks5_pw)
-			&& ps.proxy_peer_connections)
+		else if (web_seed_hostname_via_proxy(ps, hostname))
 		{
+			// the hostname is resolved by the proxy itself; there's no local
+			// address to pass, so use a placeholder
 			connect_web_seed(web, {address(), std::uint16_t(port)});
 		}
 		else
@@ -6896,6 +6999,16 @@ namespace {
 			if (m_ses.alerts().should_post<peer_blocked_alert>())
 				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
 					, a, peer_blocked_alert::ip_filter);
+			return;
+		}
+
+		if (web_seed_hostname_via_proxy(m_ses.proxy(), hostname))
+		{
+			// let the proxy resolve the web seed's hostname itself, instead
+			// of leaking it to the local resolver. connect_web_seed() forces
+			// the hostname into the CONNECT request in this case. there's no
+			// local address to pass, so use a placeholder
+			connect_web_seed(web, tcp::endpoint(address(), std::uint16_t(port)));
 			return;
 		}
 
@@ -6996,7 +7109,11 @@ namespace {
 		TORRENT_ASSERT(is_single_thread());
 		if (m_abort) return;
 
-		if (m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
+		// when the hostname is resolved by the proxy (see
+		// settings_pack::proxy_hostnames), "a" is an unspecified-address
+		// placeholder and there's no IP known here to filter against
+		bool const address_known = !a.address().is_unspecified();
+		if (address_known && m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
 		{
 			if (m_ses.alerts().should_post<peer_blocked_alert>())
 				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
@@ -7074,10 +7191,12 @@ namespace {
 		}
 
 		// The SSRF mitigation for web seeds is that any HTTP server on the
-		// local network may not use any query string parameters
-		if (settings().get_bool(settings_pack::ssrf_mitigation)
-			&& aux::is_local(web->peer_info.addr)
-			&& path.find('?') != std::string::npos)
+		// local network may not use any query string parameters. this can't
+		// be evaluated when the hostname is resolved by the proxy (see
+		// settings_pack::proxy_hostnames), since peer_info.addr is then an
+		// unspecified placeholder rather than the real target address
+		if (settings().get_bool(settings_pack::ssrf_mitigation) && address_known
+			&& aux::is_local(web->peer_info.addr) && path.find('?') != std::string::npos)
 		{
 #ifndef TORRENT_DISABLE_LOGGING
 			if (should_log())
@@ -7103,7 +7222,7 @@ namespace {
 			&& !is_ip;
 
 		if (!is_ip
-			&& settings().get_bool(settings_pack::proxy_send_host_in_connect))
+			&& (proxy_hostnames || settings().get_bool(settings_pack::proxy_send_host_in_connect)))
 		{
 			if (auto* inner1 = std::get_if<http_stream>(&s))
 			{
@@ -7232,6 +7351,17 @@ namespace {
 		TORRENT_ASSERT(m_torrent_file->is_valid());
 		if (!m_torrent_file->is_valid()) return {};
 		TORRENT_ASSERT(validate_hash_request(req, m_torrent_file->layout()));
+
+		// m_merkle_trees is only populated for v2 (or hybrid) torrents with
+		// valid metadata (see initialize_merkle_trees()); req.file is
+		// validated against the full file layout, not against m_merkle_trees,
+		// so a v1-only torrent (or one whose metadata hasn't resolved yet)
+		// must be rejected here rather than indexed out of bounds. Callers
+		// are expected to have already checked has_v2() and valid_metadata(),
+		// so reaching this in a debug build indicates a caller bug.
+		TORRENT_ASSERT(req.file >= file_index_t{0} && req.file < m_merkle_trees.end_index());
+		if (req.file < file_index_t{0} || req.file >= m_merkle_trees.end_index())
+			return {};
 
 		auto const& f = m_merkle_trees[req.file];
 
@@ -8239,6 +8369,15 @@ namespace {
 		{
 			std::lock_guard<std::mutex> l(m_torrent_file_mutex);
 			m_torrent_file_external = m_torrent_file;
+		}
+
+		// a peer's protocol_v2 flag can be set speculatively before metadata
+		// is valid, since a magnet link's info-hash doesn't establish
+		// whether the torrent has a v2 info hash
+		if (!m_info_hash.has_v2() && m_peer_list)
+		{
+			for (auto* pp : *m_peer_list)
+				pp->protocol_v2 = false;
 		}
 
 		m_size_on_disk = m_torrent_file->layout().size_on_disk();
@@ -11829,20 +11968,29 @@ namespace {
 			hashes.resize(torrent_file().layout().blocks_in_piece2(piece));
 		}
 
+		std::uint8_t const gen = m_picker_generation;
+
 		if (settings().get_bool(settings_pack::disable_hash_checks))
 		{
 			// short-circuit the hash check if it's disabled
 			m_picker->started_hash_job(piece);
-			on_piece_verified(std::move(hashes), piece, sha1_hash(), storage_error{});
+			on_piece_verified(std::move(hashes), piece, sha1_hash(), storage_error{}, gen);
 			return;
 		}
 
 		span<sha256_hash> v2_span(hashes);
-		m_ses.disk_thread().async_hash(m_storage, piece, v2_span, flags
-			, [self = shared_from_this(), hashes1 = std::move(hashes)]
-			(piece_index_t p, sha1_hash const& h, storage_error const& error) mutable
-			{ self->on_piece_verified(std::move(hashes1), p, h, error); });
+		// mark the piece as hashing before dispatching: with 0 disk threads
+		// (aio_threads=0, e.g. simulations), async_hash() may invoke its
+		// completion handler inline, before this call even returns.
 		m_picker->started_hash_job(piece);
+		m_ses.disk_thread().async_hash(m_storage,
+			piece,
+			v2_span,
+			flags,
+			[self = shared_from_this(), hashes1 = std::move(hashes), gen](
+				piece_index_t p, sha1_hash const& h, storage_error const& error) mutable {
+				self->on_piece_verified(std::move(hashes1), p, h, error, gen);
+			});
 		m_ses.deferred_submit_jobs();
 	}
 

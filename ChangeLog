@@ -1,5 +1,14 @@
-2.1.1 not released
+2.1.2 not released
 
+	* fix file priority updates being lost when issued in quick succession
+	* deprecate internal functions of file_storage
+	* optimize loading torrents
+	* fix mis-attribution of tracker source when loading a torrent file
+	* fix race between async_hash() and force_recheck()
+
+2.1.1 released
+
+	* fix merkle tree issue
 	* require webtorrent RTC offer IDs to be exactly 20 bytes
 	* fix point-to-point interfaces without a route to the internet being used for outgoing traffic
 	* apply IP filter to DHT node
@@ -43,8 +52,16 @@
 	* added support for WebTorrent
 	* removed support for BEP 17 web seeds (in favor of BEP 19)
 
+2.0.15 not released
+
+	* fix DNS leak of i2p udp tracker hostnames
+	* fix DNS leak of hostnamed peers from trackers
+	* extend proxy_hostnames to HTTP proxies for web seeds
+	* fix ip_filter/ssrf_mitigation false positives on proxied web seeds
+
 2.0.14 released
 
+	* fix issue in merkle tree
 	* fix use of a stack buffer past its lifetime when sending i2p SAM commands
 	* fix issues with active_time, seeding_time and finished_time
 	* fix torrent updates for idle torrents

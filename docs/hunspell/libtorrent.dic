@@ -80,6 +80,7 @@ downloader
 bitset
 kB
 hostname
+hostnames
 indices
 dht
 lsd
@@ -552,7 +553,7 @@ cpp
 tos
 BP
 qB
-LT2100
+LT2110
 iocontrol
 getname
 getpeername

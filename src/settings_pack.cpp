@@ -124,7 +124,7 @@ namespace {
 		SET(proxy_username, "", &session_impl::update_proxy),
 		SET(proxy_password, "", &session_impl::update_proxy),
 		SET(i2p_hostname, "", &session_impl::update_i2p_bridge),
-		SET(peer_fingerprint, "-LT2100-", nullptr),
+		SET(peer_fingerprint, "-LT2110-", nullptr),
 		SET(dht_bootstrap_nodes, "dht.libtorrent.org:25401", &session_impl::update_dht_bootstrap_nodes),
 		SET(natpmp_gateway, "", nullptr),
 		SET(webtorrent_stun_server, "stun.l.google.com:19302", nullptr)
@@ -389,7 +389,8 @@ namespace {
 		SET(i2p_outbound_length_variance, 0, nullptr),
 		SET(natpmp_lease_duration, 3600, nullptr),
 		SET(min_websocket_announce_interval, 1 * 60, nullptr),
-		SET(webtorrent_connection_timeout, 2 * 60, nullptr)
+		SET(webtorrent_connection_timeout, 2 * 60, nullptr),
+		SET(max_webtorrent_offers, 10, nullptr)
 	}});
 	// clang-format on
 
