@@ -336,6 +336,10 @@ namespace libtorrent::aux {
 		// peer pointer
 		void clear_peer(aux::torrent_peer* peer);
 
+		// like clear_peer(), but unconditionally, avoiding a pointer match
+		// over m_block_info per peer when every torrent_peer is invalid at once
+		void clear_all_peers();
+
 #if TORRENT_USE_INVARIANT_CHECKS
 		// this is an invariant check
 		void check_peers();
@@ -407,6 +411,10 @@ namespace libtorrent::aux {
 
 		// returns the number of blocks there is in the given piece
 		int blocks_in_piece(piece_index_t) const;
+
+		// number of blocks in the given piece that carry real payload,
+		// i.e. excluding any trailing pad blocks
+		int payload_blocks_in_piece(piece_index_t) const;
 
 		// return the peer pointers to all peers that participated in
 		// this piece

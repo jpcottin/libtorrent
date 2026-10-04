@@ -1302,7 +1302,9 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
 	void torrent::clear_peers()
 	{
 		disconnect_all(error_code(), operation_t::unknown);
-		if (m_peer_list) m_peer_list->clear();
+		if (m_peer_list)
+			m_peer_list->clear();
+		all_peers_erased();
 	}
 
 	void torrent::set_sequential_range(piece_index_t first_piece, piece_index_t last_piece)
@@ -5010,21 +5012,31 @@ namespace {
 
 		std::vector<torrent_peer*> const downloaders = m_picker->get_downloaders(index);
 
-		// decrease the trust point of all peers that sent
-		// parts of this piece.
-		// first, build a set of all peers that participated
+		// pad-file bytes are synthesized locally and never downloaded; they
+		// always occupy a piece's trailing blocks. Excluding them keeps a
+		// lone real downloader from appearing to share the piece with an
+		// unidentified participant. A null entry among the payload blocks
+		// means that block's peer has since disconnected, and still counts
+		// as an (untraceable) participant.
+		TORRENT_ASSERT(downloaders.size() == std::size_t(m_picker->blocks_in_piece(index)));
+		int const payload_blocks = m_picker->payload_blocks_in_piece(index);
+
+		// build a set of all peers that participated in this piece, to
+		// penalize the ones responsible for the bad data.
 		// if we know which blocks failed, just include the peer(s) sending those
 		// blocks
 		std::set<torrent_peer*> const peers = [&]
 		{
 			std::set<torrent_peer*> ret;
-			if (!blocks.empty() && !downloaders.empty())
+			if (!blocks.empty())
 			{
 				for (auto const b : blocks) ret.insert(downloaders[std::size_t(b)]);
 			}
 			else
 			{
-				std::copy(downloaders.begin(), downloaders.end(), std::inserter(ret, ret.begin()));
+				std::copy(downloaders.begin(),
+					downloaders.begin() + payload_blocks,
+					std::inserter(ret, ret.begin()));
 			}
 			return ret;
 		}();
@@ -5415,7 +5427,9 @@ namespace {
 		// if there are any other peers allocated still, we need to clear them
 		// now. They can't be cleared later because the allocator will already
 		// have been destructed
-		if (m_peer_list) m_peer_list->clear();
+		if (m_peer_list)
+			m_peer_list->clear();
+		all_peers_erased();
 		m_connections.clear();
 		m_outgoing_pids.clear();
 		m_peers_to_disconnect.clear();
@@ -9260,9 +9274,11 @@ namespace {
 		INVARIANT_CHECK;
 
 		file_storage const& fs = m_torrent_file->layout();
-		TORRENT_ASSERT(index >= file_index_t(0));
-		TORRENT_ASSERT(index < fs.end_file());
-		TORRENT_UNUSED(fs);
+		TORRENT_ASSERT_PRECOND(index >= file_index_t(0));
+		TORRENT_ASSERT_PRECOND(index < fs.end_file());
+		// avoid indexing fs out of bounds in release builds
+		if (index < file_index_t(0) || index >= fs.end_file())
+			return;
 
 		// storage may be nullptr during shutdown
 		if (!m_storage)
@@ -12063,6 +12079,7 @@ namespace {
 	// plugin an erasure notification without adding a new virtual to the
 	// public torrent_plugin interface (which would break ABI).
 	void smart_ban_notify_erase_peers(torrent_plugin* ext, span<aux::torrent_peer* const> peers);
+	void smart_ban_notify_clear_peers(torrent_plugin* ext);
 #endif
 
 	// this is called when torrent_peers are removed from the peer_list
@@ -12084,6 +12101,21 @@ namespace {
 #if TORRENT_USE_INVARIANT_CHECKS
 		m_picker->check_peers();
 #endif
+	}
+
+	void torrent::all_peers_erased()
+	{
+#ifndef TORRENT_DISABLE_EXTENSIONS
+		for (auto const& ext : m_extensions)
+			smart_ban_notify_clear_peers(ext.get());
+#endif
+
+		if (!has_picker())
+			return;
+
+		// clear_all_peers() already nulls every peer pointer unconditionally,
+		// so check_peers() would have nothing to catch here
+		m_picker->clear_all_peers();
 	}
 
 #if TORRENT_ABI_VERSION == 1

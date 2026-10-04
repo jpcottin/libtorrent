@@ -553,7 +553,7 @@ cpp
 tos
 BP
 qB
-LT2110
+LT2120
 iocontrol
 getname
 getpeername
@@ -646,6 +646,10 @@ reflinks
 reflinked
 base64
 ZFS
+zfs
+bcachefs
+nilfs2
+f2fs
 google
 WebTorrent
 webtorrent

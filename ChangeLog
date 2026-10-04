@@ -1,5 +1,19 @@
-2.1.2 not released
+2.1.3 not released
 
+	* fix out of bounds write in the alert_message C binding on non-positive size
+	* fix pread disk I/O holding back write completions until the end of a flush
+	* fix pread disk I/O async_hash2() of a cached block that ends in a pad file
+	* improve copy_file throughput with dynamic buffer size
+	* fix disk.num_blocks_written over-counting with pread disk I/O
+
+2.1.2 released
+
+	* add missing python binding for filenames class
+	* fix edge case in filename deduplication
+	* fix web seed coalesced requests for v2 torrents
+	* fix pre-allocation after enabling files with pread disk I/O
+	* fix race between stop torrent and hasher threads in pread_storage
+	* prevent pread disk I/O from overwriting files when renaming
 	* fix file priority updates being lost when issued in quick succession
 	* deprecate internal functions of file_storage
 	* optimize loading torrents
@@ -52,8 +66,16 @@
 	* added support for WebTorrent
 	* removed support for BEP 17 web seeds (in favor of BEP 19)
 
-2.0.15 not released
+2.0.16 not released
 
+	* fix renaming sanitized files back to their original name
+
+2.0.15 released
+
+	* fix inline asm for crc32 computation
+	* fix edge cases in hash picker
+	* fix shutdown issue with SSL torrents
+	* fix bug in hash-picker timeout
 	* fix DNS leak of i2p udp tracker hostnames
 	* fix DNS leak of hostnamed peers from trackers
 	* extend proxy_hostnames to HTTP proxies for web seeds
@@ -2352,4 +2374,3 @@ Initial release 0.9
 	* supports compact=1
 	* selective downloading
 	* ip filter
-

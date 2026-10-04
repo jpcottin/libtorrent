@@ -21,5 +21,19 @@ TORRENT_TEST(identify_client)
 	TEST_EQUAL(aux::identify_client_impl(peer_id("M1-2-3--............")), "Mainline 1.2.3");
 	TEST_EQUAL(aux::identify_client_impl(peer_id("\0\0\0\0\0\0\0\0\0\0\0\0........")), "Generic");
 	TEST_EQUAL(aux::identify_client_impl(peer_id("-xx1230-............")), "xx 1.2.3");
+
+	// Transmission's legacy "-TRXYYR-" encoding (0.80 through 3.00) must
+	// not be parsed as three separate Azureus-style version components.
+	TEST_EQUAL(aux::identify_client_impl(peer_id("-TR2210-............")), "Transmission 2.21.0");
+	TEST_EQUAL(aux::identify_client_impl(peer_id("-TR2220-............")), "Transmission 2.22.0");
+	TEST_EQUAL(aux::identify_client_impl(peer_id("-TR2830-............")), "Transmission 2.83.0");
+	TEST_EQUAL(aux::identify_client_impl(peer_id("-TR3000-............")), "Transmission 3.0.0");
+	TEST_EQUAL(aux::identify_client_impl(peer_id("-TR300Z-............")), "Transmission 3.0.0.35");
+	TEST_EQUAL(aux::identify_client_impl(peer_id("-TR300X-............")), "Transmission 3.0.0.33");
+
+	// a non-digit, non-uppercase-letter suffix is not a valid legacy
+	// Transmission encoding and must not be parsed as one.
+	TEST_EQUAL(aux::identify_client_impl(peer_id("-TR300!-............")),
+		"Unknown [-TR300!-............]");
 }
 

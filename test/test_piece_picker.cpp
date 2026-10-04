@@ -754,6 +754,118 @@ TORRENT_TEST(partial_piece_order_most_complete)
 	TEST_CHECK(picked.front() == piece_block(3_piece, 3));
 }
 
+TORRENT_TEST(partial_piece_order_filters_ineligible)
+{
+	// pieces 0 and 1 rank ahead of piece 2, but the peer does not have them
+	auto p = setup_picker("1234", "    ", "", "1111");
+	auto picked = pick_pieces(
+		p, "  **", 1, 0, nullptr, options | piece_picker::prioritize_partials, empty_vector);
+	TEST_EQUAL(picked.size(), 1);
+	TEST_EQUAL(picked.front().piece_index, 2_piece);
+}
+
+TORRENT_TEST(partial_piece_order_equal_rank)
+{
+	// Equivalent partials may be visited in any order, but one piece should be
+	// exhausted before moving to the next one. Four requested blocks out of
+	// 48 free blocks exercise the heap path.
+	auto p = setup_picker("1111111111111111", "                ", "", "1111111111111111");
+	auto picked = pick_pieces(p,
+		"****************",
+		4,
+		0,
+		nullptr,
+		options | piece_picker::prioritize_partials,
+		empty_vector);
+	TEST_EQUAL(picked.size(), 4);
+
+	piece_index_t const first_piece = picked.front().piece_index;
+	TEST_EQUAL(picked[1].piece_index, first_piece);
+	TEST_EQUAL(picked[2].piece_index, first_piece);
+	TEST_CHECK(picked[3].piece_index != first_piece);
+
+	std::set<piece_index_t> pieces;
+	for (piece_block const block : picked)
+	{
+		pieces.insert(block.piece_index);
+		TEST_CHECK(block.block_index > 0);
+	}
+	TEST_EQUAL(pieces.size(), 2);
+}
+
+TORRENT_TEST(partial_piece_order_heap_multiple_pops)
+{
+	// Seven requested blocks are less than a tenth of the 72 free blocks, so
+	// this traverses three heap roots. The first three partials have unique
+	// availability ranks; identity among the equivalent remaining ties is
+	// intentionally unspecified.
+	std::string const availability = "123" + std::string(21, '9');
+	std::string const empty(24, ' ');
+	std::string const partials(24, '1');
+	std::string const peer_pieces(24, '*');
+	auto p = setup_picker(availability.c_str(), empty.c_str(), "", partials.c_str());
+	auto const picked = pick_pieces(p,
+		peer_pieces.c_str(),
+		7,
+		0,
+		nullptr,
+		options | piece_picker::prioritize_partials,
+		empty_vector);
+	TEST_EQUAL(picked.size(), 7);
+
+	for (int i = 0; i < 3; ++i)
+		TEST_EQUAL(picked[std::size_t(i)].piece_index, 0_piece);
+	for (int i = 3; i < 6; ++i)
+		TEST_EQUAL(picked[std::size_t(i)].piece_index, 1_piece);
+	TEST_EQUAL(picked[6].piece_index, 2_piece);
+}
+
+TORRENT_TEST(partial_piece_order_locked)
+{
+	// The rarest partial is locked. A small request must skip it and keep
+	// consuming the remaining partials in rarest-first order.
+	std::string const availability = "123" + std::string(29, '9');
+	std::string const empty(32, ' ');
+	std::string const partials(32, '1');
+	std::string const peer_pieces(32, '*');
+	auto p = setup_picker(availability.c_str(), empty.c_str(), "", partials.c_str());
+	p->lock_piece(0_piece);
+	auto const picked = pick_pieces(p,
+		peer_pieces.c_str(),
+		4,
+		0,
+		nullptr,
+		options | piece_picker::prioritize_partials,
+		empty_vector);
+	TEST_EQUAL(picked.size(), 4);
+	if (picked.size() != 4)
+		return;
+
+	for (int i = 0; i < 3; ++i)
+		TEST_EQUAL(picked[std::size_t(i)].piece_index, 1_piece);
+	TEST_EQUAL(picked[3].piece_index, 2_piece);
+}
+
+TORRENT_TEST(partial_piece_order_backup)
+{
+	// Requesting whole pieces from a different peer turns partial-piece blocks
+	// into backups. The best-ranked partial should still supply that backup.
+	auto p = setup_picker("2314", "    ", "", "");
+	for (piece_index_t piece : {0_piece, 1_piece, 2_piece, 3_piece})
+		p->mark_as_downloading(piece_block(piece, 0), &tmp1);
+
+	auto picked = pick_pieces(p,
+		"****",
+		1,
+		blocks_per_piece,
+		&peer_struct,
+		options | piece_picker::prioritize_partials,
+		empty_vector);
+	TEST_EQUAL(picked.size(), 1);
+	TEST_EQUAL(picked.front().piece_index, 2_piece);
+	TEST_CHECK(picked.front().block_index > 0);
+}
+
 TORRENT_TEST(partial_piece_order_sequential)
 {
 	// if we don't use rarest first when we prioritize partials, but instead use
@@ -1452,6 +1564,41 @@ TORRENT_TEST(picking_downloading_blocks)
 	TEST_EQUAL(picked.size(), 1);
 }
 
+TORRENT_TEST(dont_pick_locked_partial_pieces_prioritized)
+{
+	// make sure a locked partial piece never contributes a block when picked
+	// through the prioritize_partials + rarest_first path, including when
+	// there's enough free-block capacity to push pick_pieces() into the
+	// heap-based ordering of partials (rather than a plain sort)
+	auto p = setup_picker("11111111", "        ", "", "");
+
+	// turn every piece into a partial (downloading) piece with 3 free
+	// blocks each (out of 4), so num_free_blocks comfortably clears the
+	// heap-capacity threshold even for a single requested block
+	for (piece_index_t i(0); i < piece_index_t(8); ++i)
+		p->mark_as_downloading(piece_block(i, 0), &tmp1);
+
+	// lock one of the partial pieces; it must be skipped entirely, not just
+	// yield zero blocks
+	p->lock_piece(3_piece);
+
+	std::vector<piece_block> picked;
+	p->pick_pieces(string2vec("********"),
+		picked,
+		1,
+		0,
+		nullptr,
+		piece_picker::rarest_first | piece_picker::prioritize_partials,
+		empty_vector,
+		20,
+		pc);
+
+	TEST_CHECK(verify_pick(p, picked, true));
+	TEST_CHECK(!picked.empty());
+	for (piece_block const& b : picked)
+		TEST_CHECK(b.piece_index != 3_piece);
+}
+
 TORRENT_TEST(clear_peer)
 {
 	// test clear_peer
@@ -1480,6 +1627,26 @@ TORRENT_TEST(clear_peer)
 	p->clear_peer(&tmp2);
 	dls = p->get_downloaders(0_piece);
 	TEST_CHECK(dls == expected_dls5);
+}
+
+TORRENT_TEST(clear_all_peers)
+{
+	// test clear_all_peers
+	auto p = setup_picker("1123333", "       ", "", "");
+	p->mark_as_downloading({0_piece, 0}, &tmp1);
+	p->mark_as_downloading({0_piece, 1}, &tmp2);
+	p->mark_as_downloading({0_piece, 2}, &tmp3);
+	p->mark_as_downloading({1_piece, 1}, &tmp1);
+	p->mark_as_downloading({2_piece, 1}, &tmp2);
+	p->mark_as_downloading({3_piece, 1}, &tmp3);
+
+	std::vector<torrent_peer*> const all_null{nullptr, nullptr, nullptr, nullptr};
+
+	p->clear_all_peers();
+	TEST_CHECK(p->get_downloaders(0_piece) == all_null);
+	TEST_CHECK(p->get_downloaders(1_piece) == all_null);
+	TEST_CHECK(p->get_downloaders(2_piece) == all_null);
+	TEST_CHECK(p->get_downloaders(3_piece) == all_null);
 }
 
 TORRENT_TEST(have_all_have_none)
@@ -2322,6 +2489,33 @@ TORRENT_TEST(set_pad_bytes)
 	TEST_EQUAL(blocks[1].state, piece_picker::block_info::state_requested);
 	TEST_EQUAL(blocks[2].state, piece_picker::block_info::state_none);
 	TEST_EQUAL(blocks[3].state, piece_picker::block_info::state_finished);
+}
+
+TORRENT_TEST(set_pad_bytes_short_last_piece)
+{
+	// the last piece is shorter than a full piece (2 blocks instead of 4)
+	// and its last block is a pad block. add_download_piece() must use the
+	// actual number of blocks in this short piece, not the nominal
+	// per-piece block count, to tell payload blocks from pad blocks.
+	auto p = std::make_shared<piece_picker>(
+		std::int64_t(default_piece_size) + 2 * default_block_size, default_piece_size);
+	p->set_pad_bytes(1_piece, default_block_size);
+
+	bool const ret = p->mark_as_downloading({1_piece, 0}, tmp_peer);
+	TEST_EQUAL(ret, true);
+
+	auto const dl = p->get_download_queue();
+
+	TEST_EQUAL(dl.size(), 1);
+	TEST_EQUAL(dl[0].finished, 1);
+	TEST_EQUAL(dl[0].writing, 0);
+	TEST_EQUAL(dl[0].requested, 1);
+	TEST_EQUAL(dl[0].index, 1_piece);
+
+	auto const blocks = p->blocks_for_piece(dl[0]);
+	TEST_EQUAL(blocks.size(), 2);
+	TEST_EQUAL(blocks[0].state, piece_picker::block_info::state_requested);
+	TEST_EQUAL(blocks[1].state, piece_picker::block_info::state_finished);
 }
 
 TORRENT_TEST(set_pad_bytes_overflow)

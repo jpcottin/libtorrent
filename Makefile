@@ -1,4 +1,4 @@
-VERSION=2.1.1
+VERSION=2.1.2
 
 BUILD_CONFIG=release link=shared crypto=openssl warnings=off address-model=64
 
@@ -617,6 +617,7 @@ HEADERS = \
   aux_/link.hpp                     \
   aux_/listen_socket_handle.hpp     \
   aux_/lsd.hpp                      \
+  aux_/merge_block_requests.hpp     \
   aux_/merkle.hpp                   \
   aux_/merkle_tree.hpp              \
   aux_/mmap.hpp                     \
@@ -953,6 +954,7 @@ TEST_SOURCES = \
   test_listen_socket.cpp \
   test_lsd.cpp \
   test_magnet.cpp \
+  test_merge_block_requests.cpp \
   test_merkle.cpp \
   test_merkle_tree.cpp \
   test_mmap.cpp \

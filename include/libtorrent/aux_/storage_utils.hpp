@@ -14,6 +14,7 @@ see LICENSE file.
 #include <cstdint>
 #include <string>
 #include <functional>
+#include <vector>
 
 #include "libtorrent/config.hpp"
 #include "libtorrent/fwd.hpp"
@@ -26,6 +27,16 @@ see LICENSE file.
 namespace libtorrent::aux {
 
 	struct stat_cache;
+
+	// scratch space for copy_file(), reused across calls to avoid
+	// re-allocating (and, on POSIX, re-querying the filesystem block size
+	// for) the copy buffer for every file. Construct one instance per
+	// higher-level operation (e.g. once per move_storage() call, covering
+	// all its files) and pass it to every copy_file() call it makes
+	struct TORRENT_EXTRA_EXPORT copy_file_buffer
+	{
+		std::vector<char> buffer;
+	};
 
 	// moves the files in file_storage f from ``save_path`` to
 	// ``destination_save_path`` according to the rules defined by ``flags``.
@@ -42,6 +53,19 @@ namespace libtorrent::aux {
 	TORRENT_EXTRA_EXPORT void
 	delete_files(filenames const& fs, std::string const& save_path
 		, std::string const& part_file, remove_flags_t options, storage_error& ec);
+
+	// renames the file at ``index`` to ``new_filename`` on disk (or, if the
+	// file doesn't exist on disk yet, just records the rename in
+	// ``renamed`` so it's created under the new name later). A rename that
+	// fails because the source and destination are on different
+	// filesystems falls back to copying the file and removing the
+	// original.
+	TORRENT_EXTRA_EXPORT void rename_file(file_storage const& fs,
+		renamed_files& renamed,
+		file_index_t index,
+		std::string const& new_filename,
+		std::string const& save_path,
+		storage_error& ec);
 
 	TORRENT_EXTRA_EXPORT bool
 	verify_resume_data(add_torrent_params const& rd
@@ -79,11 +103,11 @@ namespace libtorrent::aux {
 		, std::string const& link
 		, storage_error& ec);
 
-	TORRENT_EXTRA_EXPORT void move_file(std::string const& f
-		, std::string const& newf, storage_error& se);
+	TORRENT_EXTRA_EXPORT void move_file(
+		std::string const& f, std::string const& newf, storage_error& se);
 
-	TORRENT_EXTRA_EXPORT void copy_file(std::string const& f
-		, std::string const& newf, storage_error& se);
+	TORRENT_EXTRA_EXPORT void copy_file(
+		std::string const& f, std::string const& newf, storage_error& se, copy_file_buffer& buf);
 }
 
 #endif

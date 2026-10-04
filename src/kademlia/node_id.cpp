@@ -10,6 +10,7 @@ see LICENSE file.
 */
 
 #include <algorithm>
+#include <cstring>
 
 #include "libtorrent/kademlia/node_id.hpp"
 #include "libtorrent/kademlia/node_entry.hpp"
@@ -94,12 +95,16 @@ node_id generate_id_impl(address const& ip_, std::uint32_t r)
 	std::uint32_t c;
 	if (num_octets == 4)
 	{
-		c = aux::crc32c_32(*reinterpret_cast<std::uint32_t*>(ip));
+		std::uint32_t v;
+		std::memcpy(&v, ip, 4);
+		c = aux::crc32c_32(v);
 	}
 	else
 	{
 		TORRENT_ASSERT(num_octets == 8);
-		c = aux::crc32c(reinterpret_cast<std::uint64_t*>(ip), 1);
+		std::uint64_t v;
+		std::memcpy(&v, ip, 8);
+		c = aux::crc32c(&v, 1);
 	}
 	node_id id;
 
@@ -178,20 +183,14 @@ bool matching_prefix(node_id const& nid, int mask, int prefix, int offset)
 	return (id[0] & mask) == prefix;
 }
 
-node_id generate_prefix_mask(int const bits)
+node_id generate_prefix_mask(int bits)
 {
 	TORRENT_ASSERT(bits >= 0);
-	TORRENT_ASSERT(bits <= 160);
+	bits = std::min(bits, 160);
 	node_id mask;
 	std::size_t b = 0;
-#if defined __GNUC__ && __GNUC__ == 12
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstringop-overflow"
-#endif
-	for (; int(b) < bits - 7; b += 8) mask[b / 8] |= 0xff;
-#if defined __GNUC__ && __GNUC__ == 12
-#pragma GCC diagnostic pop
-#endif
+	for (; int(b) < bits - 7; b += 8)
+		mask[b / 8] |= 0xff;
 	if (bits < 160) mask[b / 8] |= (0xff << (8 - (bits & 7))) & 0xff;
 	return mask;
 }

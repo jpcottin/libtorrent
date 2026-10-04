@@ -45,7 +45,6 @@ see LICENSE file.
 #include "libtorrent/config.hpp"
 #include "libtorrent/aux_/alloca.hpp"
 #include "libtorrent/aux_/path.hpp"
-#include "libtorrent/aux_/directory.hpp"
 #include "libtorrent/aux_/string_util.hpp"
 #include <cstring>
 #include <algorithm> // for std::replace
@@ -427,7 +426,8 @@ namespace {
 
 		// if we get here, we should copy the file
 		storage_error se;
-		aux::copy_file(file, link, se);
+		aux::copy_file_buffer buf;
+		aux::copy_file(file, link, se, buf);
 		ec = se.ec;
 	}
 
@@ -448,7 +448,7 @@ namespace {
 		{
 			auto const idx = static_cast<std::size_t>(i);
 			if (f[idx] == '/') break;
-#ifdef TORRENT_WINDOWS
+#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
 			if (f[idx] == '\\') break;
 #endif
 			if (f[idx] != '.') continue;
@@ -460,7 +460,7 @@ namespace {
 	std::string remove_extension(std::string const& f)
 	{
 		char const* slash = std::strrchr(f.c_str(), '/');
-#ifdef TORRENT_WINDOWS
+#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
 		slash = std::max((char const*)std::strrchr(f.c_str(), '\\'), slash);
 #endif
 		char const* ext = std::strrchr(f.c_str(), '.');
@@ -567,9 +567,9 @@ namespace {
 	{
 		if (f.empty()) return f;
 
-		#ifdef TORRENT_WINDOWS
+#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
 		if (f == "\\\\") return "";
-		#endif
+#endif
 		if (f == "/") return "";
 
 		int len = int(f.size());
@@ -578,11 +578,11 @@ namespace {
 		while (len > 0)
 		{
 			--len;
-			#ifdef TORRENT_WINDOWS
+#if defined(TORRENT_WINDOWS) || defined(TORRENT_OS2)
 			if (f[std::size_t(len)] == '/' || f[std::size_t(len)] == '\\') break;
-			#else
+#else
 			if (f[std::size_t(len)] == '/') break;
-			#endif
+#endif
 		}
 
 		if (f[std::size_t(len)] == '/' || f[std::size_t(len)] == '\\') ++len;
@@ -828,10 +828,10 @@ namespace {
 		return ret;
 	}
 #endif
-	bool exists(std::string const& f, error_code& ec)
+	bool exists(std::string const& f, error_code& ec, file_status_flag_t const flags)
 	{
 		file_status s;
-		stat_file(f, &s, ec);
+		stat_file(f, &s, ec, flags);
 		if (ec)
 		{
 			// if the filename is too long, the file also cannot exist
@@ -873,28 +873,6 @@ namespace {
 			return;
 		}
 #endif // TORRENT_WINDOWS
-	}
-
-	void remove_all(std::string const& f, error_code& ec)
-	{
-		ec.clear();
-
-		file_status s;
-		stat_file(f, &s, ec);
-		if (ec) return;
-
-		if (s.mode & file_status::directory)
-		{
-			for (aux::directory i(f, ec); !i.done(); i.next(ec))
-			{
-				if (ec) return;
-				std::string p = i.file();
-				if (p == "." || p == "..") continue;
-				remove_all(combine_path(f, p), ec);
-				if (ec) return;
-			}
-		}
-		remove(f, ec);
 	}
 
 	std::pair<string_view, string_view> rsplit_path(string_view p)
